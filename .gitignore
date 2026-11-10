@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# venv / uv
+.venv/
+
+# build / empaquetado
+dist/
+build/
+*.zip
+
+# OS
+.DS_Store

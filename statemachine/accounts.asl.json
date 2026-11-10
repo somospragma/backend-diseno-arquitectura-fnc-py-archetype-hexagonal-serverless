@@ -1,0 +1,97 @@
+{
+  "Comment": "Workflow de referencia Pragma: orquesta las Lambda tasks del dominio accounts. Ejemplifica Retry/Catch por estado, TimeoutSeconds, Map con concurrencia acotada y ruta de fallo hacia una DLQ. La IaC real (roles IAM minimos, ARNs, DLQ) se resuelve en el despliegue (SAM/CDK/Terraform); aqui solo se ejemplifica el contrato de orquestacion.",
+  "StartAt": "ValidateAccount",
+  "States": {
+    "ValidateAccount": {
+      "Type": "Task",
+      "Comment": "Invoca la Lambda del handler sfn-task (processSfnTask). Idempotente por executionId.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${AccountsSfnTaskFunctionArn}",
+        "Payload": {
+          "accountId.$": "$.accountId",
+          "executionId.$": "$$.Execution.Id"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "TimeoutSeconds": 30,
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.TooManyRequestsException", "Lambda.ServiceException", "States.TaskFailed"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "NotifyFailure"
+        }
+      ],
+      "Next": "ProcessItems"
+    },
+    "ProcessItems": {
+      "Type": "Map",
+      "Comment": "Procesa una coleccion acotada de items en paralelo con concurrencia limitada (nunca ilimitada).",
+      "ItemsPath": "$.items",
+      "MaxConcurrency": 5,
+      "ItemProcessor": {
+        "ProcessorConfig": { "Mode": "INLINE" },
+        "StartAt": "ProcessOneItem",
+        "States": {
+          "ProcessOneItem": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${AccountsSfnTaskFunctionArn}",
+              "Payload": {
+                "accountId.$": "$.accountId",
+                "executionId.$": "$$.Execution.Id"
+              }
+            },
+            "OutputPath": "$.Payload",
+            "TimeoutSeconds": 30,
+            "Retry": [
+              {
+                "ErrorEquals": ["States.TaskFailed"],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 3,
+                "BackoffRate": 2.0
+              }
+            ],
+            "End": true
+          }
+        }
+      },
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "NotifyFailure"
+        }
+      ],
+      "Next": "Done"
+    },
+    "Done": {
+      "Type": "Succeed"
+    },
+    "NotifyFailure": {
+      "Type": "Task",
+      "Comment": "Ruta de fallo: envia el evento fallido a la DLQ del workflow (SQS) para inspeccion/redrive.",
+      "Resource": "arn:aws:states:::sqs:sendMessage",
+      "Parameters": {
+        "QueueUrl": "${WorkflowDlqUrl}",
+        "MessageBody.$": "$"
+      },
+      "Next": "Fail"
+    },
+    "Fail": {
+      "Type": "Fail",
+      "Error": "AccountsWorkflowFailed",
+      "Cause": "Un estado del workflow fallo tras agotar los reintentos; el evento fue enviado a la DLQ."
+    }
+  }
+}
